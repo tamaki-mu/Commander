@@ -50,12 +50,15 @@ module comm_tod_HFI_mod
   public comm_HFI_tod
 
   type, extends(comm_tod) :: comm_HFI_tod
+     integer(i4b), allocatable, dimension(:,:)   :: mod_phase
    contains
-     procedure     :: process_tod          => process_HFI_tod
-     procedure     :: read_tod_inst        => read_tod_inst_HFI
-     procedure     :: read_scan_inst       => read_scan_inst_HFI
-     procedure     :: initHDF_inst         => initHDF_HFI
-     procedure     :: dumpToHDF_inst       => dumpToHDF_HFI
+     procedure     :: process_tod             => process_HFI_tod
+     procedure     :: read_tod_inst           => read_tod_inst_HFI
+     procedure     :: read_scan_inst          => read_scan_inst_HFI
+     procedure     :: initHDF_inst            => initHDF_HFI
+     procedure     :: dumpToHDF_inst          => dumpToHDF_HFI
+     procedure     :: construct_corrtemp_inst => construct_corrtemp_hfi
+!     procedure     :: apply_nonlin_corr_hfi   
   end type comm_HFI_tod
 
   interface comm_HFI_tod
@@ -139,7 +142,7 @@ contains
     nmaps_beam                  = 3
     pol_beam                    = .true.
     constructor%nside_beam      = nside_beam
-
+    
     ! Get detector labels
     call get_tokens(cpar%ds_tod_dets(id_abs), ",", constructor%label)
  
@@ -161,11 +164,15 @@ contains
     allocate(constructor%orb_dp)
     constructor%orb_dp => comm_orbdipole(constructor%mbeam)
 
+    ! Allocate modulation ph
+    allocate(constructor%mod_phase(constructor%ndet,constructor%nscan))
+    
     ! Initialize all baseline corrections to zero
     do i = 1, constructor%nscan
        constructor%scans(i)%d%baseline = 0.d0
     end do
-
+    constructor%mod_phase = 1.d0
+    
   end function constructor
 
   !**************************************************
@@ -324,11 +331,11 @@ contains
        ! Prepare data
        if (sample_rel_bandpass) then
 !          if (.true. .or. self%myid == 78) write(*,*) 'b', self%myid, self%correct_sl, self%ndet, self%slconv(1)%p%psires
-          call sd%init_singlehorn(self, i, map_sky, procmask, procmask2, init_s_bp=.true., init_s_bp_prop=.true.)
+          call init_scan_data_singlehorn(sd, self, i, map_sky, procmask, procmask2, init_s_bp=.true., init_s_bp_prop=.true.)
        else if (sample_abs_bandpass) then
-          call sd%init_singlehorn(self, i, map_sky, procmask, procmask2, init_s_bp=.true., init_s_sky_prop=.true.)
+          call init_scan_data_singlehorn(sd, self, i, map_sky, procmask, procmask2, init_s_bp=.true., init_s_sky_prop=.true.)
        else
-          call sd%init_singlehorn(self, i, map_sky, procmask, procmask2, init_s_bp=.true.)
+          call init_scan_data_singlehorn(sd, self, i, map_sky, procmask, procmask2, init_s_bp=.true.)
        end if
 
 !!$       ! Calling Simulation Routine
@@ -366,10 +373,10 @@ contains
        !    Not implemented yet       
 
        ! remove cosmic rays
-       do j=1, sd%ndet
-        call self%cray(j)%p%build_cray_templates()
-        call self%cray(j)%p%fit_cray_amplitudes()
-       end do
+!!$       do j=1, sd%ndet
+!!$        call self%cray(j)%p%build_cray_templates()
+!!$        call self%cray(j)%p%fit_cray_amplitudes()
+!!$       end do
 
        ! Fit and subtract 4K lines
        !    Not implemented yet       
@@ -421,7 +428,7 @@ contains
        end if
 
        ! Clean up
-       call sd%dealloc
+       call dealloc_scandata(sd)
        deallocate(d_calib)
 
     end do
@@ -526,154 +533,67 @@ contains
     !
     implicit none
     class(comm_scandata),                         intent(in)    :: self
-    class(comm_tod),                              intent(inout) :: tod
+    class(comm_hfi_tod),                          intent(inout) :: tod
     integer(i4b),                                 intent(in)    :: scan
     type(planck_rng),                             intent(inout) :: handle
 
-    real(dp) :: sigma_0
+    real(dp) :: invN, B(3), eta(3), X(3), A(3,3), sgn
     integer(i4b) :: i, j
-    real(dp), allocatable, dimension(:,:)     :: T, even, uneven, tod_inv_N, matrix_buf, A, A_sqrt, s_tot_inv_N
-    real(dp), allocatable, dimension(:)       :: B, eta, X
-    real(dp), allocatable, dimension(:)       :: temp
-    real(dp) :: gain_median
 
     ! tod%scans(scan)%d(i)%gain - the gain constant over a scan [real number]
     ! sd = self --- self%s_tot - sky signal model
     ! self%s_tot(self%ntod, self%ndet) - how s_tot structured
 
-    
-    allocate(s_tot_inv_N(self%ntod, tod%ndet))
-    allocate(tod_inv_N(self%ntod, tod%ndet))
-    allocate(even(self%ntod, tod%ndet), uneven(self%ntod, tod%ndet))
-
-    s_tot_inv_N = self%s_tot
-    tod_inv_N = self%tod
-
-    ! preparing utility and noise matrices, where noise is assumed constant
-    do i = 1, tod%ndet
-        sigma_0  = tod%scans(scan)%d(i)%N_psd%sigma0
-
-        do j = 1, self%ntod
-            even(j,i) = 0.d0 !/sigma_0/sigma_0
-            uneven(j,i) = 1.d0/sigma_0/sigma_0
-            s_tot_inv_N(j,i) = s_tot_inv_N(j,i)/sigma_0/sigma_0
-            tod_inv_N(j,i) = tod_inv_N(j,i)/sigma_0/sigma_0
-        end do
-    end do
-
-    !call multiply_inv_N(tod, scan, s_tot_inv_N)
-    !call multiply_inv_N(tod, scan, tod_inv_N)
-    !call multiply_inv_N(tod, scan, even)
-    !call multiply_inv_N(tod, scan, uneven)
-
-
     do i = 1, tod%ndet
 
-       allocate(T(self%ntod,3))
-       allocate(matrix_buf(self%ntod,3))
-       allocate(A(3,3), A_sqrt(3,3))
-       allocate(B(3), eta(3), X(3))
-
-
-       ! fill the matrix T and flip every other sample
+       ! Build linear system
+       A   = 0.d0
+       B   = 0.d0
+       sgn = tod%mod_phase(i,scan)
        do j = 1, self%ntod
-           if (mod(j,2) /= 0) then
-               T(j,1) = -1.d0 * self%s_tot(j, i) !* tod%scans(scan)%d(i)%gain
-               T(j,2) = 1.d0
-               T(j,3) = 0.d0
-           else
-               T(j,1) = 1.d0 * self%s_tot(j, i) !* tod%scans(scan)%d(i)%gain
-               T(j,2) = 0.d0
-               T(j,3) = 1.d0
-           end if
-
+          if (self%mask(j,i) == 0) then
+             sgn = -sgn
+             cycle
+          end if
+          A(1,1) = A(1,1) +       self%s_tot(j,i) * self%s_tot(j,i)
+          B(1)   = B(1)   + sgn * self%s_tot(j,i) * self%tod(j,i)
+          if (mod(j,2) == 1) then 
+             A(2,1) = A(2,1) + self%s_tot(j,i) 
+             A(2,2) = A(2,2) + 1.d0
+             B(2)   = B(2)   + self%tod(j,i)
+          else
+             A(3,1) = A(3,1) - self%s_tot(j,i) 
+             A(3,3) = A(3,3) + 1.d0
+             B(3)   = B(3)   + self%tod(j,i)
+          end if
+          sgn = -sgn
        end do
-
-       ! multiply matrices (N^-1 x T) possibly (T^t x N^-1)
-       do j = 1, self%ntod
-           if (mod(j,2) /= 0) then
-               matrix_buf(j,1) = -1.d0 * s_tot_inv_N(j,i)
-               matrix_buf(j,2) = uneven(j,i)
-               matrix_buf(j,3) = even(j,i)
-           else
-               matrix_buf(j,1) = 1.d0 * s_tot_inv_N(j,i)
-               matrix_buf(j,2) = even(j,i)
-               matrix_buf(j,3) = uneven(j,i)     
-           end if
-       end do
-
+       A = A / tod%scans(scan)%d(i)%N_psd%sigma0**2
+       b = b / tod%scans(scan)%d(i)%N_psd%sigma0**2
        
-       ! multiply matrices T^t x N^-1 x T
-       do j = 1, 3
-           A(1,j) = sum(T(:,1)*matrix_buf(:,j)) 
-           A(2,j) = sum(T(:,2)*matrix_buf(:,j)) 
-           A(3,j) = sum(T(:,3)*matrix_buf(:,j)) 
-       
-           ! preparing for A_sqrt calculation
-           A_sqrt(1,j) = A(1,j)
-           A_sqrt(2,j) = A(2,j)
-           A_sqrt(3,j) = A(3,j)
+       ! solving the linear system 
+       call solve_system_real(A, x, B)
 
-       end do
-
-       
-       ! multiply T^t x N^-1 x d
-       do j = 1, 3
-           B(j) = sum(T(:,j)*tod_inv_N(:,i)) 
-       end do
-
-
-       call compute_hermitian_root(A_sqrt, 0.5d0)       
-
-
-       ! fill random gaussian N(0,1) eta
+       ! Add fluctuation
+       call compute_hermitian_root(A, -0.5d0)
        do j = 1, 3
            eta(j) = rand_gauss(handle) 
-       end do
-
-       ! multiply ((T^t x N^-1) x T)^0.5 eta
-       do j = 1, 3
-           B(j) = B(j) + sum(A_sqrt(j,:)*eta(:))
-       end do
-
-       ! solving the linear system 
-       call solve_system_real(A, X, B)
-
-
-       !write(*,*) "X=", X(1), " ", X(2), " ", X(3)
+        end do
+        x    = x + matmul(A, eta)
+        !x(1) = abs(x(1))           ! Ensure positive galactic plane
+        
        ! saving the offset (and gain) to the tod object
+       write(*,*) "X=", real(X,sp)
        tod%scans(scan)%d(i)%gain = X(1)
        tod%scans(scan)%d(i)%baseline  = X(2)
        tod%scans(scan)%d(i)%baseline2 = X(3)
 
-
-       ! calculate gain as a median of all scans 
-       ! (a temporary solution, before a proper sampling established)
-       if (scan == tod%nscan) then 
-           allocate(temp(tod%nscan))
-
-           do j = 1, tod%nscan
-               temp(j) = tod%scans(j)%d(i)%gain
-           end do
-
-           gain_median = median(temp)
-
-           do j = 1, tod%nscan
-               tod%scans(j)%d(i)%gain = gain_median
-           end do
-
-           deallocate(temp)
+       if (x(1) < 0.d0) then
+          tod%scans(scan)%d(i)%gain = -X(1)
+          tod%mod_phase(i,scan)     = -tod%mod_phase(i,scan)
        end if
-
-
-
-       deallocate(T, matrix_buf, A, A_sqrt)
-       deallocate(B, eta, X)
-
+       
     end do
-
-
-  deallocate(s_tot_inv_N, tod_inv_N, even, uneven)
 
   end subroutine sample_hfi_baselines
 
@@ -696,20 +616,22 @@ contains
     !
     implicit none
     class(comm_scandata),                         intent(inout) :: self
-    class(comm_tod),                              intent(in)    :: tod
+    class(comm_hfi_tod),                          intent(in)    :: tod
     integer(i4b),                                 intent(in)    :: scan
 
     integer(i4b) :: i, j
+    real(sp)     :: sgn
     logical :: exists
 
     do i = 1, tod%ndet
-
+       sgn = tod%mod_phase(i,scan)
+       
        ! Subtract baselines and flip sign of even samples
        do j = 1, self%ntod
-           if (mod(j,2) /= 0) then
-               self%tod(j,i) = -(self%tod(j,i) - tod%scans(scan)%d(i)%baseline)
+           if (mod(j,2) == 1) then
+               self%tod(j,i) =  sgn*(self%tod(j,i) - tod%scans(scan)%d(i)%baseline)
            else
-               self%tod(j,i) = (self%tod(j,i) - tod%scans(scan)%d(i)%baseline2)
+               self%tod(j,i) = -sgn*(self%tod(j,i) - tod%scans(scan)%d(i)%baseline2)
            end if
        end do
 
@@ -812,5 +734,62 @@ contains
     type(hdf_file),                      intent(in)     :: chainfile
     character(len=*),                    intent(in)     :: path
   end subroutine dumpToHDF_HFI
+
+  subroutine construct_corrtemp_hfi(self, scan, pix, psi, s)
+    !  Construct an LFI instrument-specific correction template; for now contains 1Hz template only
+    !
+    !  Arguments:
+    !  ----------
+    !  self: comm_tod object
+    !
+    !  scan: int
+    !       scan number
+    !  pix: int
+    !       index for pixel
+    !  psi: int
+    !       integer label for polarization angle
+    !
+    !  Returns:
+    !  --------
+    !  s:   real (sp)
+    !       output template timestream
+    implicit none
+    class(comm_hfi_tod),                   intent(in)    :: self
+    integer(i4b),                          intent(in)    :: scan
+    integer(i4b),        dimension(:,:),   intent(in)    :: pix, psi
+    real(sp),            dimension(:,:),   intent(out)   :: s
+
+    integer(i4b) :: i, j, k, nbin, b
+    real(dp)     :: dt, t_tot, t
+
+    s = 0.
+
+  end subroutine construct_corrtemp_hfi
+
+  subroutine apply_hfi_nonlin_corr(self, sd)
+    !  Construct an LFI instrument-specific correction template; for now contains 1Hz template only
+    !
+    !  Arguments:
+    !  ----------
+    !  self: comm_tod object
+    !
+    !  scan: int
+    !       scan number
+    !  pix: int
+    !       index for pixel
+    !  psi: int
+    !       integer label for polarization angle
+    !
+    !  Returns:
+    !  --------
+    !  s:   real (sp)
+    !       output template timestream
+    implicit none
+    class(comm_hfi_tod),                   intent(in)    :: self
+    class(comm_scandata),                  intent(inout) :: sd
+
+    return
+    
+  end subroutine apply_hfi_nonlin_corr
 
 end module comm_tod_HFI_mod
