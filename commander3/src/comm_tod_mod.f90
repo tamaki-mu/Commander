@@ -1790,7 +1790,7 @@ contains
     !  self: comm_tod object
     !
     implicit none
-    class(comm_tod),                       intent(inout)    :: self
+    class(comm_tod),                       intent(in)       :: self
     integer(i4b),                          intent(in)       :: scan
     class(comm_scandata),                  intent(inout)    :: sd
 

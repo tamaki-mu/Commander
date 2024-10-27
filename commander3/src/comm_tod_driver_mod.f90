@@ -20,7 +20,7 @@ contains
   !  Scan data routines
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   subroutine init_scan_data_singlehorn(sd, tod, scan, map_sky, procmask, procmask2, &
-       & init_s_bp, init_s_bp_prop, init_s_sky_prop)
+       & init_s_bp, init_s_bp_prop, init_s_sky_prop, skip_nonlin)
     implicit none
     class(comm_scandata),                      intent(inout)          :: sd    
     class(comm_tod),                           intent(inout)          :: tod
@@ -31,9 +31,10 @@ contains
     logical(lgt),                              intent(in),   optional :: init_s_bp
     logical(lgt),                              intent(in),   optional :: init_s_bp_prop
     logical(lgt),                              intent(in),   optional :: init_s_sky_prop
+    logical(lgt),                              intent(in),   optional :: skip_nonlin
 
     integer(i4b) :: j, k, ndelta
-    logical(lgt) :: init_s_bp_, init_s_bp_prop_, init_s_sky_prop_
+    logical(lgt) :: init_s_bp_, init_s_bp_prop_, init_s_sky_prop_, skip_nonlin_
 
     if (tod%nhorn /= 1) then
        write(*,*) 'Error: init_scan_data_singlehorn only applicable for 1-horn experiments'
@@ -44,6 +45,7 @@ contains
 
     init_s_bp_ = .false.; if (present(init_s_bp)) init_s_bp_ = init_s_bp
     init_s_sky_prop_ = .false.; if (present(init_s_sky_prop)) init_s_sky_prop_ = init_s_sky_prop
+    skip_nonlin_ = .false.; if (present(skip_nonlin)) skip_nonlin_ = skip_nonlin 
     init_s_bp_prop_ = .false.
     if (present(init_s_bp_prop)) then
        init_s_bp_prop_  = init_s_bp_prop
@@ -223,7 +225,7 @@ contains
     end do
 
     ! Apply non-linearity corrections
-    call tod%apply_nonlin_corr_inst(scan, sd)
+    if (.not. skip_nonlin_) call tod%apply_nonlin_corr_inst(scan, sd)
     
     !call update_status(status, "todinit_stot")
 

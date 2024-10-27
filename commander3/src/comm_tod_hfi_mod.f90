@@ -58,7 +58,7 @@ module comm_tod_HFI_mod
      procedure     :: initHDF_inst            => initHDF_HFI
      procedure     :: dumpToHDF_inst          => dumpToHDF_HFI
      procedure     :: construct_corrtemp_inst => construct_corrtemp_hfi
-!     procedure     :: apply_nonlin_corr_hfi   
+     procedure     :: apply_nonlin_corr_inst  => apply_nonlin_corr_hfi
   end type comm_HFI_tod
 
   interface comm_HFI_tod
@@ -305,6 +305,26 @@ contains
     ! Perform main sampling steps
     !------------------------------------
 
+    ! Fit low-level non-linearity parameters
+    do i = 1, self%nscan
+       
+       ! Skip scan if no accepted data
+       if (.not. any(self%scans(i)%d%accept)) cycle
+       call init_scan_data_singlehorn(sd, self, i, map_sky, procmask, procmask2, skip_nonlin=.true.)
+
+       ! Estimate modulation baselines; separate for odd and even samples
+       call sample_hfi_baselines(sd, self, i, handle)
+
+       ! Fix modulation phase
+       if (self%first_call) call set_modulation_phase(sd, self, i)
+
+       ! Estimate ADC corrections
+       !    Not implemented yet
+       
+       ! Clean up
+       call dealloc_scandata(sd)
+    end do
+    
     ! Sample gain components in separate TOD loops; marginal with respect to n_corr
     !call sample_calibration(self, 'abscal', handle, map_sky, procmask, procmask2)
     !call sample_calibration(self, 'relcal', handle, map_sky, procmask, procmask2)
@@ -321,7 +341,7 @@ contains
        slist   = ''
     end if
 
-    ! Perform loop over scans
+    ! Fit higher-level corrections
     if (self%myid == 0) write(*,*) '   --> Sampling ncorr, xi_n, maps'
     do i = 1, self%nscan
        
@@ -349,19 +369,6 @@ contains
        ! ************************************************************************************
        !       Perform low-level TOD processing; raw modulated TOD -> clean demodulated TOD
        ! ************************************************************************************
-
-       ! Estimate ADC corrections
-       !    Not implemented yet
-
-       ! Apply ADC corrections to raw self%tod
-       !    Not implemented yet
-
-       ! Estimate baselines; separate for odd and even samples
-       call sample_hfi_baselines(sd, self, i, handle)
-       call set_modulation_phase(sd, self, i)
-
-       ! Demodulate TOD
-       call demodulate_tod(sd, self, i)
 
        if (self%first_call) then
           ! Search for jumps
@@ -571,13 +578,7 @@ contains
        b2 = b2 / tod%scans(scan)%d(i)%N_psd%sigma0**2
        tod%scans(scan)%d(i)%baseline2  = b2/A2 + rand_gauss(handle)/sqrt(A2)
 
-       ! saving the offset (and gain) to the tod object
-       
-!!$       if (b1/A1 < b2/A2 .and. tod%mod_phase(i,scan) == 1) then
-!!$          tod%mod_phase(i,scan) = -1
-!!$       end if
-
-       write(*,*) "baseline=", tod%scans(scan)%d(i)%baseline, tod%scans(scan)%d(i)%baseline2, tod%mod_phase(i,scan)
+       !write(*,*) "baseline=", tod%scans(scan)%d(i)%baseline, tod%scans(scan)%d(i)%baseline2, tod%mod_phase(i,scan)
 
     end do
 
@@ -614,10 +615,6 @@ contains
     real(dp) :: mu, n
     integer(i4b) :: i, j
     
-    ! tod%scans(scan)%d(i)%gain - the gain constant over a scan [real number]
-    ! sd = self --- self%s_tot - sky signal model
-    ! self%s_tot(self%ntod, self%ndet) - how s_tot structured
-
     do i = 1, tod%ndet
        if (.not. tod%scans(scan)%d(i)%accept) cycle       
        
@@ -639,7 +636,7 @@ contains
        else
           mu = mu/n
 
-          ! saving the offset (and gain) to the tod object
+          ! saving the phase to the tod object
           if (mu < 0.d0) then
              tod%mod_phase(i,scan) = -1
           end if
@@ -647,97 +644,6 @@ contains
     end do
 
   end subroutine set_modulation_phase
-  
-!!$  subroutine sample_hfi_baselines(self, tod, scan, handle)
-!!$    ! 
-!!$    ! Estimates baselines for MODULATED data, separate for odd and even samples
-!!$    ! 
-!!$    ! Arguments:
-!!$    ! ----------
-!!$    ! self:     derived class (comm_scandata)
-!!$    !           HFI-specific TOD object
-!!$    ! tod:      comm_tod derived type
-!!$    !             contains TOD-specific information         
-!!$    ! scan:     scan ID
-!!$    ! handle:   planck_rng derived type
-!!$    !           Healpix definition for random number generation
-!!$    !           so that the same sequence can be resumed later on from that same
-!!$    !           point
-!!$    !           
-!!$    !
-!!$    ! Returns
-!!$    ! ----------
-!!$    !   None, but updates tod%scans(scan)%d(:)%baseline  (for odd samples)
-!!$    !                     tod%scans(scan)%d(:)%baseline2 (for even samples)
-!!$    !                     tod%scans(scan)%d(:)%gain (temporary solution)
-!!$    !
-!!$    implicit none
-!!$    class(comm_scandata),                 intent(in)    :: self
-!!$    class(comm_hfi_tod),                  intent(inout) :: tod
-!!$    integer(i4b),                         intent(in)    :: sca66n
-!!$    type(planck_rng),                     intent(inout) :: handle
-!!$    logical(lgt),                         intent(in), optional :: update_gain
-!!$    
-!!$    real(dp) :: invN, B(3), eta(3), X(3), A(3,3), sgn
-!!$    integer(i4b) :: i, j
-!!$    
-!!$    ! tod%scans(scan)%d(i)%gain - the gain constant over a scan [real number]
-!!$    ! sd = self --- self%s_tot - sky signal model
-!!$    ! self%s_tot(self%ntod, self%ndet) - how s_tot structured
-!!$
-!!$    do i = 1, tod%ndet
-!!$
-!!$       ! Build linear system
-!!$       A   = 0.d0
-!!$       B   = 0.d0
-!!$       sgn = tod%mod_phase(i,scan)
-!!$       do j = 1, self%ntod
-!!$          if (self%mask(j,i) == 0) then
-!!$             sgn = -sgn
-!!$             cycle
-!!$          end if
-!!$          A(1,1) = A(1,1) +       self%s_tot(j,i) * self%s_tot(j,i)
-!!$          B(1)   = B(1)   + sgn * self%s_tot(j,i) * self%tod(j,i)
-!!$          if (mod(j,2) == 1) then 
-!!$             A(2,1) = A(2,1) + self%s_tot(j,i) 
-!!$             A(2,2) = A(2,2) + 1.d0
-!!$             B(2)   = B(2)   + self%tod(j,i)
-!!$          else
-!!$             A(3,1) = A(3,1) - self%s_tot(j,i) 
-!!$             A(3,3) = A(3,3) + 1.d0
-!!$             B(3)   = B(3)   + self%tod(j,i)
-!!$          end if
-!!$          sgn = -sgn
-!!$       end do
-!!$       A = A / tod%scans(scan)%d(i)%N_psd%sigma0**2
-!!$       b = b / tod%scans(scan)%d(i)%N_psd%sigma0**2
-!!$       
-!!$       ! solving the linear system 
-!!$       call solve_system_real(A, x, B)
-!!$
-!!$       ! Add fluctuation
-!!$       call compute_hermitian_root(A, -0.5d0)
-!!$       do j = 1, 3
-!!$          eta(j) = rand_gauss(handle) 
-!!$       end do
-!!$       x    = x + matmul(A, eta)
-!!$       !x(1) = abs(x(1))           ! Ensure positive galactic plane
-!!$        
-!!$       if (x(1) < 0.d0) then
-!!$          x(1) = -x(1)
-!!$          tod%mod_phase(i,scan)     = -tod%mod_phase(i,scan)
-!!$       end if
-!!$
-!!$       ! saving the offset (and gain) to the tod object
-!!$       write(*,*) "X=", real(X,sp)
-!!$       if (update_gain_) tod%scans(scan)%d(i)%gain = X(1)
-!!$       tod%scans(scan)%d(i)%baseline  = X(2)
-!!$       tod%scans(scan)%d(i)%baseline2 = X(3)
-!!$       
-!!$    end do
-!!$
-!!$  end subroutine sample_hfi_baselines
-
   
 
   subroutine demodulate_tod(self, tod, scan)
@@ -769,7 +675,7 @@ contains
        if (.not. tod%scans(scan)%d(i)%accept) cycle       
        sgn = tod%mod_phase(i,scan)
        
-       ! Subtract baselines and flip sign of even samples
+       ! Subtract baselines and flip sign of every other sample
        do j = 1, self%ntod
            if (mod(j,2) == 1) then
                self%tod(j,i) =  sgn*(self%tod(j,i) - tod%scans(scan)%d(i)%baseline)
@@ -915,8 +821,8 @@ contains
 
   end subroutine construct_corrtemp_hfi
 
-  subroutine apply_hfi_nonlin_corr(self, sd)
-    !  Construct an LFI instrument-specific correction template; for now contains 1Hz template only
+  subroutine apply_nonlin_corr_hfi(self, scan, sd)
+    !  Construct and apply HFI instrument-specific non-linear corrections
     !
     !  Arguments:
     !  ----------
@@ -935,10 +841,15 @@ contains
     !       output template timestream
     implicit none
     class(comm_hfi_tod),                   intent(in)    :: self
+    integer(i4b),                          intent(in)    :: scan
     class(comm_scandata),                  intent(inout) :: sd
 
-    return
+    ! Apply ADC corrections to raw self%tod
+    !    Not implemented yet
+
+    ! Demodulate TOD
+    call demodulate_tod(sd, self, scan)
     
-  end subroutine apply_hfi_nonlin_corr
+  end subroutine apply_nonlin_corr_hfi
 
 end module comm_tod_HFI_mod
