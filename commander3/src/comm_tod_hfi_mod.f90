@@ -313,7 +313,11 @@ contains
        call init_scan_data_singlehorn(sd, self, i, map_sky, procmask, procmask2, skip_nonlin=.true.)
 
        ! Estimate modulation baselines; separate for odd and even samples
-       call sample_hfi_baselines(sd, self, i, handle)
+       if (self%first_call) then
+          call sample_hfi_baselines(sd, self, i, handle, subtract_s_tot=.false.)
+       else
+          call sample_hfi_baselines(sd, self, i, handle)
+       end if
 
        ! Fix modulation phase
        if (self%first_call) call set_modulation_phase(sd, self, i)
@@ -517,7 +521,7 @@ contains
   end subroutine process_HFI_tod
 
 
-  subroutine sample_hfi_baselines(self, tod, scan, handle)
+  subroutine sample_hfi_baselines(self, tod, scan, handle, subtract_s_tot)
     ! 
     ! Estimates baselines for MODULATED data, separate for odd and even samples
     ! 
@@ -545,9 +549,14 @@ contains
     class(comm_hfi_tod),                  intent(inout) :: tod
     integer(i4b),                         intent(in)    :: scan
     type(planck_rng),                     intent(inout) :: handle
+    logical(lgt),                         intent(in), optional :: subtract_s_tot
     
     real(dp) :: eta, A1, A2, x, b1, b2, sgn,gal_mean
     integer(i4b) :: i, j, n
+    logical(lgt) :: sub_s
+
+    sub_s = .true.; if (present(subtract_s_tot)) sub_s = subtract_s_tot
+    
     
     ! tod%scans(scan)%d(i)%gain - the gain constant over a scan [real number]
     ! sd = self --- self%s_tot - sky signal model
@@ -555,6 +564,7 @@ contains
 
     do i = 1, tod%ndet
        if (.not. tod%scans(scan)%d(i)%accept) cycle
+       sgn = tod%mod_phase(i,scan)
        
        ! Odd samples
        A1 = 0.d0; b1 = 0; gal_mean = 0.d0; n = 0
@@ -562,6 +572,7 @@ contains
           if (self%mask(j,i) == 0) cycle
           A1 = A1 + 1.d0
           b1 = b1 + self%tod(j,i)
+          if (sub_s) b1 = b1 - sgn*tod%scans(scan)%d(i)%gain * self%s_tot(j,i)
        end do
        A1 = A1 / tod%scans(scan)%d(i)%N_psd%sigma0**2
        b1 = b1 / tod%scans(scan)%d(i)%N_psd%sigma0**2
@@ -573,6 +584,7 @@ contains
           if (self%mask(j,i) == 0) cycle
           A2 = A2 + 1.d0
           b2 = b2 + self%tod(j,i)
+          if (sub_s) b1 = b1 + sgn*tod%scans(scan)%d(i)%gain * self%s_tot(j,i)
        end do
        A2 = A2 / tod%scans(scan)%d(i)%N_psd%sigma0**2
        b2 = b2 / tod%scans(scan)%d(i)%N_psd%sigma0**2
