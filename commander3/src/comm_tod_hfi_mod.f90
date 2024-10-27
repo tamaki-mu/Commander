@@ -163,14 +163,14 @@ contains
     
     allocate(constructor%orb_dp)
     constructor%orb_dp => comm_orbdipole(constructor%mbeam)
-
-    ! Allocate modulation ph
-    allocate(constructor%mod_phase(constructor%ndet,constructor%nscan))
     
     ! Initialize all baseline corrections to zero
     do i = 1, constructor%nscan
        constructor%scans(i)%d%baseline = 0.d0
     end do
+
+    ! Allocate modulation phase
+    allocate(constructor%mod_phase(constructor%ndet,constructor%nscan))
     constructor%mod_phase = 1.d0
     
   end function constructor
@@ -278,7 +278,8 @@ contains
     deallocate(m_buf)
 
     call map_in(1,1)%p%writeFITS(trim(self%outdir) // "/input_sky_model_"//trim(self%label(1))//".fits")
-
+    !call self%procmask%writeFITS("mask.fits")
+    
 !    call mpi_finalize(ierr)
 !    stop
 
@@ -357,6 +358,7 @@ contains
 
        ! Estimate baselines; separate for odd and even samples
        call sample_hfi_baselines(sd, self, i, handle)
+       call set_modulation_phase(sd, self, i)
 
        ! Demodulate TOD
        call demodulate_tod(sd, self, i)
@@ -532,71 +534,211 @@ contains
     !                     tod%scans(scan)%d(:)%gain (temporary solution)
     !
     implicit none
-    class(comm_scandata),                         intent(in)    :: self
-    class(comm_hfi_tod),                          intent(inout) :: tod
-    integer(i4b),                                 intent(in)    :: scan
-    type(planck_rng),                             intent(inout) :: handle
-
-    real(dp) :: invN, B(3), eta(3), X(3), A(3,3), sgn
-    integer(i4b) :: i, j
-
+    class(comm_scandata),                 intent(in)    :: self
+    class(comm_hfi_tod),                  intent(inout) :: tod
+    integer(i4b),                         intent(in)    :: scan
+    type(planck_rng),                     intent(inout) :: handle
+    
+    real(dp) :: eta, A1, A2, x, b1, b2, sgn,gal_mean
+    integer(i4b) :: i, j, n
+    
     ! tod%scans(scan)%d(i)%gain - the gain constant over a scan [real number]
     ! sd = self --- self%s_tot - sky signal model
     ! self%s_tot(self%ntod, self%ndet) - how s_tot structured
 
     do i = 1, tod%ndet
-
-       ! Build linear system
-       A   = 0.d0
-       B   = 0.d0
-       sgn = tod%mod_phase(i,scan)
-       do j = 1, self%ntod
-          if (self%mask(j,i) == 0) then
-             sgn = -sgn
-             cycle
-          end if
-          A(1,1) = A(1,1) +       self%s_tot(j,i) * self%s_tot(j,i)
-          B(1)   = B(1)   + sgn * self%s_tot(j,i) * self%tod(j,i)
-          if (mod(j,2) == 1) then 
-             A(2,1) = A(2,1) + self%s_tot(j,i) 
-             A(2,2) = A(2,2) + 1.d0
-             B(2)   = B(2)   + self%tod(j,i)
-          else
-             A(3,1) = A(3,1) - self%s_tot(j,i) 
-             A(3,3) = A(3,3) + 1.d0
-             B(3)   = B(3)   + self%tod(j,i)
-          end if
-          sgn = -sgn
+       if (.not. tod%scans(scan)%d(i)%accept) cycle
+       
+       ! Odd samples
+       A1 = 0.d0; b1 = 0; gal_mean = 0.d0; n = 0
+       do j = 1, self%ntod, 2
+          if (self%mask(j,i) == 0) cycle
+          A1 = A1 + 1.d0
+          b1 = b1 + self%tod(j,i)
        end do
-       A = A / tod%scans(scan)%d(i)%N_psd%sigma0**2
-       b = b / tod%scans(scan)%d(i)%N_psd%sigma0**2
-       
-       ! solving the linear system 
-       call solve_system_real(A, x, B)
+       A1 = A1 / tod%scans(scan)%d(i)%N_psd%sigma0**2
+       b1 = b1 / tod%scans(scan)%d(i)%N_psd%sigma0**2
+       tod%scans(scan)%d(i)%baseline  = b1/A1 + rand_gauss(handle)/sqrt(A1)
 
-       ! Add fluctuation
-       call compute_hermitian_root(A, -0.5d0)
-       do j = 1, 3
-           eta(j) = rand_gauss(handle) 
-        end do
-        x    = x + matmul(A, eta)
-        !x(1) = abs(x(1))           ! Ensure positive galactic plane
-        
+       ! Even samples
+       A2 = 0.d0; b2 = 0.d0
+       do j = 2, self%ntod, 2
+          if (self%mask(j,i) == 0) cycle
+          A2 = A2 + 1.d0
+          b2 = b2 + self%tod(j,i)
+       end do
+       A2 = A2 / tod%scans(scan)%d(i)%N_psd%sigma0**2
+       b2 = b2 / tod%scans(scan)%d(i)%N_psd%sigma0**2
+       tod%scans(scan)%d(i)%baseline2  = b2/A2 + rand_gauss(handle)/sqrt(A2)
+
        ! saving the offset (and gain) to the tod object
-       write(*,*) "X=", real(X,sp)
-       tod%scans(scan)%d(i)%gain = X(1)
-       tod%scans(scan)%d(i)%baseline  = X(2)
-       tod%scans(scan)%d(i)%baseline2 = X(3)
-
-       if (x(1) < 0.d0) then
-          tod%scans(scan)%d(i)%gain = -X(1)
-          tod%mod_phase(i,scan)     = -tod%mod_phase(i,scan)
-       end if
        
+!!$       if (b1/A1 < b2/A2 .and. tod%mod_phase(i,scan) == 1) then
+!!$          tod%mod_phase(i,scan) = -1
+!!$       end if
+
+       write(*,*) "baseline=", tod%scans(scan)%d(i)%baseline, tod%scans(scan)%d(i)%baseline2, tod%mod_phase(i,scan)
+
     end do
 
   end subroutine sample_hfi_baselines
 
+  subroutine set_modulation_phase(self, tod, scan)
+    ! 
+    ! Estimates baselines for MODULATED data, separate for odd and even samples
+    ! 
+    ! Arguments:
+    ! ----------
+    ! self:     derived class (comm_scandata)
+    !           HFI-specific TOD object
+    ! tod:      comm_tod derived type
+    !             contains TOD-specific information         
+    ! scan:     scan ID
+    ! handle:   planck_rng derived type
+    !           Healpix definition for random number generation
+    !           so that the same sequence can be resumed later on from that same
+    !           point
+    !           
+    !
+    ! Returns
+    ! ----------
+    !   None, but updates tod%scans(scan)%d(:)%baseline  (for odd samples)
+    !                     tod%scans(scan)%d(:)%baseline2 (for even samples)
+    !                     tod%scans(scan)%d(:)%gain (temporary solution)
+    !
+    implicit none
+    class(comm_scandata),                 intent(in)    :: self
+    class(comm_hfi_tod),                  intent(inout) :: tod
+    integer(i4b),                         intent(in)    :: scan
+    
+    real(dp) :: mu, n
+    integer(i4b) :: i, j
+    
+    ! tod%scans(scan)%d(i)%gain - the gain constant over a scan [real number]
+    ! sd = self --- self%s_tot - sky signal model
+    ! self%s_tot(self%ntod, self%ndet) - how s_tot structured
+
+    do i = 1, tod%ndet
+       if (.not. tod%scans(scan)%d(i)%accept) cycle       
+       
+       mu = 0.d0; n = 0.d0
+       do j = 1, self%ntod, 2
+          if (self%pix(j,i,1) > 0.48*tod%info%npix .and. self%pix(j,i,1) < 0.52*tod%info%npix) then
+             if (mod(j,2) == 1) then
+                mu = mu + self%tod(j,1)-tod%scans(scan)%d(i)%baseline
+             else
+                mu = mu - self%tod(j,1)-tod%scans(scan)%d(i)%baseline
+             end if
+             n  = n  + 1.d0
+          end if
+       end do
+
+       if (n == 0) then
+          write(*,*) "Scan disabled in set_modulation_phase"
+          tod%scans(scan)%d(i)%accept = .false.
+       else
+          mu = mu/n
+
+          ! saving the offset (and gain) to the tod object
+          if (mu < 0.d0) then
+             tod%mod_phase(i,scan) = -1
+          end if
+       end if
+    end do
+
+  end subroutine set_modulation_phase
+  
+!!$  subroutine sample_hfi_baselines(self, tod, scan, handle)
+!!$    ! 
+!!$    ! Estimates baselines for MODULATED data, separate for odd and even samples
+!!$    ! 
+!!$    ! Arguments:
+!!$    ! ----------
+!!$    ! self:     derived class (comm_scandata)
+!!$    !           HFI-specific TOD object
+!!$    ! tod:      comm_tod derived type
+!!$    !             contains TOD-specific information         
+!!$    ! scan:     scan ID
+!!$    ! handle:   planck_rng derived type
+!!$    !           Healpix definition for random number generation
+!!$    !           so that the same sequence can be resumed later on from that same
+!!$    !           point
+!!$    !           
+!!$    !
+!!$    ! Returns
+!!$    ! ----------
+!!$    !   None, but updates tod%scans(scan)%d(:)%baseline  (for odd samples)
+!!$    !                     tod%scans(scan)%d(:)%baseline2 (for even samples)
+!!$    !                     tod%scans(scan)%d(:)%gain (temporary solution)
+!!$    !
+!!$    implicit none
+!!$    class(comm_scandata),                 intent(in)    :: self
+!!$    class(comm_hfi_tod),                  intent(inout) :: tod
+!!$    integer(i4b),                         intent(in)    :: sca66n
+!!$    type(planck_rng),                     intent(inout) :: handle
+!!$    logical(lgt),                         intent(in), optional :: update_gain
+!!$    
+!!$    real(dp) :: invN, B(3), eta(3), X(3), A(3,3), sgn
+!!$    integer(i4b) :: i, j
+!!$    
+!!$    ! tod%scans(scan)%d(i)%gain - the gain constant over a scan [real number]
+!!$    ! sd = self --- self%s_tot - sky signal model
+!!$    ! self%s_tot(self%ntod, self%ndet) - how s_tot structured
+!!$
+!!$    do i = 1, tod%ndet
+!!$
+!!$       ! Build linear system
+!!$       A   = 0.d0
+!!$       B   = 0.d0
+!!$       sgn = tod%mod_phase(i,scan)
+!!$       do j = 1, self%ntod
+!!$          if (self%mask(j,i) == 0) then
+!!$             sgn = -sgn
+!!$             cycle
+!!$          end if
+!!$          A(1,1) = A(1,1) +       self%s_tot(j,i) * self%s_tot(j,i)
+!!$          B(1)   = B(1)   + sgn * self%s_tot(j,i) * self%tod(j,i)
+!!$          if (mod(j,2) == 1) then 
+!!$             A(2,1) = A(2,1) + self%s_tot(j,i) 
+!!$             A(2,2) = A(2,2) + 1.d0
+!!$             B(2)   = B(2)   + self%tod(j,i)
+!!$          else
+!!$             A(3,1) = A(3,1) - self%s_tot(j,i) 
+!!$             A(3,3) = A(3,3) + 1.d0
+!!$             B(3)   = B(3)   + self%tod(j,i)
+!!$          end if
+!!$          sgn = -sgn
+!!$       end do
+!!$       A = A / tod%scans(scan)%d(i)%N_psd%sigma0**2
+!!$       b = b / tod%scans(scan)%d(i)%N_psd%sigma0**2
+!!$       
+!!$       ! solving the linear system 
+!!$       call solve_system_real(A, x, B)
+!!$
+!!$       ! Add fluctuation
+!!$       call compute_hermitian_root(A, -0.5d0)
+!!$       do j = 1, 3
+!!$          eta(j) = rand_gauss(handle) 
+!!$       end do
+!!$       x    = x + matmul(A, eta)
+!!$       !x(1) = abs(x(1))           ! Ensure positive galactic plane
+!!$        
+!!$       if (x(1) < 0.d0) then
+!!$          x(1) = -x(1)
+!!$          tod%mod_phase(i,scan)     = -tod%mod_phase(i,scan)
+!!$       end if
+!!$
+!!$       ! saving the offset (and gain) to the tod object
+!!$       write(*,*) "X=", real(X,sp)
+!!$       if (update_gain_) tod%scans(scan)%d(i)%gain = X(1)
+!!$       tod%scans(scan)%d(i)%baseline  = X(2)
+!!$       tod%scans(scan)%d(i)%baseline2 = X(3)
+!!$       
+!!$    end do
+!!$
+!!$  end subroutine sample_hfi_baselines
+
+  
 
   subroutine demodulate_tod(self, tod, scan)
     ! 
@@ -624,6 +766,7 @@ contains
     logical :: exists
 
     do i = 1, tod%ndet
+       if (.not. tod%scans(scan)%d(i)%accept) cycle       
        sgn = tod%mod_phase(i,scan)
        
        ! Subtract baselines and flip sign of even samples
@@ -637,6 +780,12 @@ contains
 
     end do
 
+!!$    open(58,file='tod.dat')
+!!$    do j = 1, self%ntod
+!!$       write(58,*) j, self%tod(j,1), self%mask(j,1)
+!!$    end do
+!!$    close(58)
+    
   end subroutine demodulate_tod
 
   

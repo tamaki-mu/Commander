@@ -202,6 +202,8 @@ module comm_tod_mod
      procedure(process_tod), deferred    :: process_tod
      procedure                           :: construct_sl_template
      procedure                           :: construct_corrtemp_inst
+     procedure                           :: construct_nonlin_corr_inst
+     procedure                           :: apply_nonlin_corr_inst
      procedure                           :: construct_dipole_template
      procedure                           :: construct_dipole_template_diff
      procedure                           :: output_scan_list
@@ -1752,6 +1754,49 @@ contains
     s = 0.d0
 
   end subroutine construct_corrtemp_inst
+
+  subroutine construct_nonlin_corr_inst(self, scan, sd)
+    !  Construct an instrument-specific correction template
+    !
+    !  Arguments:
+    !  ----------
+    !  self: comm_tod object
+    !
+    !  scan: int
+    !       scan number
+    !  pix: int
+    !       index for pixel
+    !  psi: int
+    !       integer label for polarization angle
+    !
+    !  Returns:
+    !  --------
+    !  s:   real (sp)
+    !       output template timestream
+    implicit none
+    class(comm_tod),                       intent(inout)    :: self
+    integer(i4b),                          intent(in)       :: scan
+    class(comm_scandata),                  intent(inout)    :: sd
+
+    return
+    
+  end subroutine construct_nonlin_corr_inst
+
+  subroutine apply_nonlin_corr_inst(self, scan, sd)
+    !  Apply an instrument-specific non_linear corrections
+    !
+    !  Arguments:
+    !  ----------
+    !  self: comm_tod object
+    !
+    implicit none
+    class(comm_tod),                       intent(inout)    :: self
+    integer(i4b),                          intent(in)       :: scan
+    class(comm_scandata),                  intent(inout)    :: sd
+
+    return
+    
+  end subroutine apply_nonlin_corr_inst
 
   
   subroutine construct_dipole_template(self, scan, pix, psi, s_dip)

@@ -85,6 +85,7 @@ contains
        call tod%decompress_pointing_and_flags(scan, j, sd%pix(:,j,:), &
             & sd%psi(:,j,:), sd%flag(:,j))
     end do
+    
     call timer%stop(TOD_DECOMP, tod%band)
     !call update_status(status, "todinit_decomp")
     !if (tod%myid == 78) write(*,*) 'c3', tod%myid, tod%correct_sl, tod%ndet, tod%slconv(1)%p%psires
@@ -222,11 +223,7 @@ contains
     end do
 
     ! Apply non-linearity corrections
-!!$    select type (tod)
-!!$    class is (comm_hfi_tod)
-!!$       call tod%apply_hfi_nonlin_corr(sd)
-!!$    end select
-    
+    call tod%apply_nonlin_corr_inst(scan, sd)
     
     !call update_status(status, "todinit_stot")
 
