@@ -164,7 +164,7 @@ module comm_param_mod
      character(len=512), allocatable, dimension(:)   :: ds_tod_filelist
      character(len=512), allocatable, dimension(:)   :: ds_tod_jumplist
      character(len=512), allocatable, dimension(:)   :: ds_tod_instfile
-     character(len=512), allocatable, dimension(:)   :: ds_tod_dets
+     character(len=2048), allocatable, dimension(:)   :: ds_tod_dets
      character(len=512), allocatable, dimension(:)   :: ds_tod_bp_init
      character(len=512), allocatable, dimension(:)   :: ds_tod_initHDF
      character(len=512), allocatable, dimension(:)   :: ds_tod_level
@@ -282,6 +282,20 @@ module comm_param_mod
      character(len=2048), allocatable        :: zs_samp_groups(:), zs_samp_group_bands(:)
      logical(lgt)                            :: zs_output_comps, zs_output_ascii, zs_joint_mono, zs_output_tod_res
      type(InterplanetaryDustParamLabels)     :: zodi_param_labels
+
+
+     ! MH spectral index sampling parameters
+     integer(i4b)                                :: mcmc_num_user_samp_groups                     ! NUM_MCMC_SAMPLING_GROUPS
+     integer(i4b)                                :: mcmc_num_samp_groups                          ! NUM_MCMC_SAMPLING_GROUPS
+     character(len=2048), allocatable            :: mcmc_samp_groups(:)                           ! MCMC_SAMPLING_GROUP_PARAMS, MCMC_SAMPLING_GROUP_CHISQ_BANDS
+     character(len=512), dimension(MAXSAMPGROUP) :: mcmc_samp_group_mask
+     character(len=512), dimension(MAXSAMPGROUP) :: mcmc_samp_group_bands
+     character(len=512), dimension(MAXSAMPGROUP) :: mcmc_update_cg_groups                         ! MCMC_SAMPLING_GROUP_UPDATE_CG_GROUPS&&
+                                                                                                  ! Sample using specificed cg
+                                                                                                  ! groups. If none, skip amplitude
+                                                                                                  ! sampling
+     integer(i4b), allocatable, dimension(:,:)   :: mcmc_group_bands_indices
+     integer(i4b), allocatable, dimension(:)     :: mcmc_samp_group_numstep
   end type comm_params
 
 
@@ -453,7 +467,7 @@ contains
        call int2string(i,itext)
        call get_parameter_hashtable(htbl, 'INIT_CHAIN'//itext,     par_string=cpar%init_chain_prefixes(i))
     end do
-    call get_parameter_hashtable(htbl, 'SAMPLE_ONLY_POLARIZATION', par_lgt=cpar%only_pol)
+    call get_parameter_hashtable(htbl, 'SAMPLE_ONLY_POLARIZATION', par_lgt=cpar%only_pol)  !!! only_pol
     call get_parameter_hashtable(htbl, 'SAMPLE_ONLY_TEMPERATURE', par_lgt=cpar%only_I)
     call get_parameter_hashtable(htbl, 'CG_CONVERGENCE_CRITERION', par_string=cpar%cg_conv_crit)
     call get_parameter_hashtable(htbl, 'CG_PRECOND_TYPE',          par_string=cpar%cg_precond)
@@ -652,6 +666,10 @@ contains
        if (trim(cpar%ds_tod_type(i)) /= 'none') then
           call get_parameter_hashtable(htbl, 'BAND_TOD_DETECTOR_LIST'//itext, len_itext=len_itext, &
                & par_string=cpar%ds_tod_dets(i), path=.false.)
+          if (index(cpar%ds_tod_dets(i), '.txt') /= 0) then
+          call get_parameter_hashtable(htbl, 'BAND_TOD_DETECTOR_LIST'//itext, len_itext=len_itext, &
+               & par_string=cpar%ds_tod_dets(i), path=.true.)
+          end if
        end if
 
        if (cpar%enable_TOD_analysis) then
@@ -759,6 +777,19 @@ contains
        call get_parameter_hashtable(htbl, 'CG_SAMPLING_GROUP_MAXITER'//itext, par_int=cpar%cg_samp_group_maxiter(i))
        call get_parameter_hashtable(htbl, 'CG_SAMPLING_GROUP_BANDS'//itext, par_string=cpar%cg_samp_group_bands(i))
     end do
+
+    call get_parameter_hashtable(htbl, 'NUM_MCMC_SAMPLING_GROUPS', par_int=cpar%mcmc_num_user_samp_groups)
+    cpar%mcmc_num_samp_groups = cpar%mcmc_num_user_samp_groups
+    allocate(cpar%mcmc_samp_groups(cpar%mcmc_num_user_samp_groups), cpar%mcmc_samp_group_numstep(cpar%mcmc_num_user_samp_groups))
+    do i = 1, cpar%mcmc_num_user_samp_groups
+       call int2string(i, itext)
+       call get_parameter_hashtable(htbl, 'MCMC_SAMPLING_GROUP_CHISQ_MASK'//itext, par_string=cpar%mcmc_samp_group_mask(i), path=.true.)
+       call get_parameter_hashtable(htbl, 'MCMC_SAMPLING_GROUP_CHISQ_BANDS'//itext, par_string=cpar%mcmc_samp_group_bands(i))
+       call get_parameter_hashtable(htbl, 'MCMC_SAMPLING_GROUP_PARAMS'//itext, par_string=cpar%mcmc_samp_groups(i))
+       call get_parameter_hashtable(htbl, 'MCMC_SAMPLING_GROUP_UPDATE_CG_GROUPS'//itext, par_string=cpar%mcmc_update_cg_groups(i))
+       call get_parameter_hashtable(htbl, 'MCMC_SAMPLING_GROUP_NUMSTEP'//itext, par_int=cpar%mcmc_samp_group_numstep(i))
+    end do
+
     call get_parameter_hashtable(htbl, 'LOCALSAMP_BURN_IN', par_int=cpar%cs_local_burn_in)
     call get_parameter_hashtable(htbl, 'LOCALSAMP_OUTPUT_MAPS', par_lgt=cpar%cs_output_localsamp_maps)
 
@@ -3259,7 +3290,7 @@ end subroutine
     if (io_error == 0) then
        ! Do nothing
     else
-       write(*,*) 'Could not open file: ', trim(adjustl(detector_list_file))
+       write(*,*) 'Could not open file in get_detectors: ', trim(adjustl(detector_list_file))
        stop
     end if
 
@@ -3333,10 +3364,9 @@ end subroutine
     unit = 20
     detector_list_file = trim(adjustl(filename))
 
-    open(unit,file=detector_list_file, status='old', action='read', iostat=io_error)
-    if (io_error == 0) then
-       ! Do nothing
-    else
+    open(unit,file=trim(detector_list_file), status='old', action='read', iostat=io_error)
+    if (io_error .ne. 0) then
+       write(*,*) io_error
        write(*,*) 'Could not open file: ', trim(adjustl(detector_list_file))
        stop
     end if
@@ -3456,6 +3486,11 @@ end subroutine
     do i = 1, cpar%cg_num_user_samp_groups
        if (trim(cpar%cg_samp_group_mask(i)) /= 'fullsky') then
           call validate_file(trim(cpar%cg_samp_group_mask(i)), 'CG_SAMPLING_GROUP_MASK'//itext)
+       end if
+    end do
+    do i = 1, cpar%mcmc_num_user_samp_groups
+       if (trim(cpar%mcmc_samp_group_mask(i)) /= 'fullsky') then
+          call validate_file(trim(cpar%mcmc_samp_group_mask(i)), 'MCMC_SAMPLING_GROUP_MASK'//itext)
        end if
     end do
 
@@ -4050,6 +4085,10 @@ end subroutine
        write(*,*) 'Error -- too many CG sampling groups defined. Increase MAXSAMPGROUP'
        stop
     end if
+
+
+    ! Temporary
+    cpar%mcmc_num_samp_groups = cpar%mcmc_num_user_samp_groups 
     
   end subroutine define_cg_samp_groups
   
