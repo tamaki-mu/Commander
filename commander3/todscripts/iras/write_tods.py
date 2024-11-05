@@ -210,7 +210,7 @@ def padd_array_gaps(splits: list[np.ndarray], padding: list[np.ndarray]) -> np.n
 
 def write_band(
         comm_tod: TODLoader, cio: CIO, filename: str, ndet: int, nside_out: int, n_pids: int
-        , pid_0: int) -> None:
+        , pid_0: int, det_num: int) -> None:
     COMMON_GROUP = "/common"
     HUFFMAN_COMPRESSION = ["huffman", {"dictNum": 1}]
 
@@ -266,7 +266,7 @@ def write_band(
         )
 
         for i in range(ndet):
-            det_lab = f'IRAS_{i+1:02}'
+            det_lab = f'IRAS_{det_num:02}'
             pid_det_group = f"{pid_label}/{det_lab}"
             comm_tod.add_field(pid_det_group + "/flag", cio[det_lab].flags[pid], HUFFMAN_COMPRESSION)
 
@@ -303,6 +303,8 @@ def write_to_commander_tods(
     version: int,
     out_path: Path,
     pid_0: int,
+    chunk: int,
+    chunk_size: int,
     overwrite: bool = False,
 ) -> None:
     manager = multiprocessing.Manager()
@@ -311,7 +313,7 @@ def write_to_commander_tods(
     multiprocessor_manager_dicts = {}
     filenames = {}
     for det in IRAS_DETS:
-        name = f"IRAS_{det:02}_n{nside_out}_v{version:02}"
+        name = f"IRAS_{det:02}_n{nside_out}_v{version:02}_{chunk:03}"
         multiprocessor_manager_dicts[name] = manager.dict()
         filenames[f'IRAS_{det:02}'] = name
 
@@ -319,12 +321,12 @@ def write_to_commander_tods(
         out_path, "", version, multiprocessor_manager_dicts, overwrite=overwrite
     )
 
-    n_pids = 0
-    for key, cio in zip(cios.keys(), cios.values()):
-        n_pids = len(cio.time_start)
-        break
-    if n_pids == 0:
-        raise ValueError("No CIOs found")
+    #n_pids = 0
+    #for key, cio in zip(cios.keys(), cios.values()):
+    #    n_pids = len(cio.time_start)
+    #    break
+    #if n_pids == 0:
+    #    raise ValueError("No CIOs found")
 
 
     x = [[]]
@@ -338,8 +340,9 @@ def write_to_commander_tods(
                 filenames[f'IRAS_{det:02}'],
                 1,
                 nside_out,
-                n_pids,
+                chunk_size,
                 pid_0,
+                det,
                 )))
 
     for res1 in x:
@@ -379,7 +382,9 @@ def main() -> None:
     pid_now = 0
     t0 = Time('1981-01-01', scale='utc')
     #for sopobs in tqdm(range(5787)):
-    for sopobs in tqdm(range(50)):
+    yday_data = []
+    chunk_size = 2
+    for sopobs in tqdm(range(10)):
 
         yday_data = get_yday_data(
             sopobs, nside_out=nside_out, color_corr=color_corr,
@@ -391,7 +396,9 @@ def main() -> None:
             nside_out=nside_out,
             version=version,
             out_path=IRAS_OUT_PATH,
-            pid_0=pid_0,
+            pid_0=sopobs+1,
+            chunk=sopobs//chunk_size,
+            chunk_size=chunk_size,
             overwrite=True,
         )
     h5_time = time.perf_counter() - start_time
