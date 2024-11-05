@@ -36,6 +36,7 @@ from scipy.interpolate import interp1d
 from astropy.time import Time, TimeDelta
 from cosmoglobe.tod_tools import TODLoader
 import pickle
+from tqdm import tqdm
 
 #from cProfile import Profile
 #from pstats import SortKey, Stats
@@ -238,6 +239,9 @@ def write_band(
 
 
     for pid in range(n_pids):
+        #DEBUG
+        #print(cio[det1].sat_pos_start[pid])
+        #print(cio[det1].sat_pos_stop[pid])
         pid_label = f"{pid+pid_0:06}"
         pid_common_group = pid_label + "/common"
 
@@ -249,11 +253,12 @@ def write_band(
 
         comm_tod.add_field(pid_common_group + "/ntod", [len(cio[det1].tods[pid])])
 
-        comm_tod.add_field(pid_common_group + "/satpos", cio[det1].sat_pos_start[pid])
-        comm_tod.add_field(pid_common_group + "/satpos_end", cio[det1].sat_pos_stop[pid])
+        comm_tod.add_field(pid_common_group + "/satpos", np.array([0,0,0]))
+        comm_tod.add_field(pid_common_group + "/satpos_end", np.array([0,0,0]))
 
-        comm_tod.add_field(pid_common_group + "/earthpos", cio[det1].earth_pos_start[pid])
-        comm_tod.add_field(pid_common_group + "/earthpos_end", cio[det1].earth_pos_stop[pid])
+        comm_tod.add_field(pid_common_group + "/earthpos", np.array([0,0,0]))
+        comm_tod.add_field(pid_common_group + "/earthpos_end",
+            np.array([0,0,0]))
 
         comm_tod.add_attribute(pid_common_group + "/satpos", "index", "X, Y, Z")
         comm_tod.add_attribute(
@@ -373,19 +378,14 @@ def main() -> None:
     print(f"{version=}, {nside_out=}")
     pid_now = 0
     t0 = Time('1981-01-01', scale='utc')
-    for sopobs in range(5787):
+    #for sopobs in tqdm(range(5787)):
+    for sopobs in tqdm(range(50)):
 
         yday_data = get_yday_data(
             sopobs, nside_out=nside_out, color_corr=color_corr,
             )
         cios = get_cios(yday_data)
         cio_time = time.perf_counter() - start_time
-        print("done")
-        print(
-            f"time spent reading in and preprocessing cios: {(cio_time/60):2.2f} minutes\n"
-        )
-
-        print("writing cios to h5 files...")
         write_to_commander_tods(
             cios,
             nside_out=nside_out,
