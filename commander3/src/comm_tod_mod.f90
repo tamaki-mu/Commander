@@ -712,6 +712,7 @@ contains
        else
          call get_tokens(trim(adjustl(det_buf(1:n))), ',', dets)
        end if
+
       
 
 !!$       do i = 1, ndet_tot
