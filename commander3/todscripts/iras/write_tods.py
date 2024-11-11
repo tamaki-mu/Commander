@@ -37,11 +37,75 @@ from pathlib import Path
 
 from cosmoglobe.tod_tools import TODLoader
 
+from astropy.coordinates import SkyCoord, FK4
+
+
 NSIDE = 2048
 t0 = Time('1981-01-01', scale='utc')
 IRAS_DATA_PATH = Path("/mn/stornext/d5/data/duncanwa/IRAS/sopobs_data")
 
 FSAMP = {'12':16, '25':16, '60':8, '100':4}
+
+gc = SkyCoord(l=0*u.degree, b=0*u.degree, frame='galactic')
+Omegas = {1: 14.5,
+        2: 12.7,
+        3: 13.0,
+        4: 11.53,
+        5: 12.0,
+        6: 12.4,
+        7:12.6,
+        8:7.2,
+        9:6.7,
+        10:6.6,
+        11:2.8,
+        12:4.3,
+        13:6.6,
+        14:6.1,
+        15:6.2,
+        16:3.5,
+        18:3.6,
+        19:2.8,
+        21:2.8,
+        22:3.1,
+        23:2.9,
+        24:3.0,
+        25:3.2,
+        26:1.2,
+        27:2.0,
+        28:3.1,
+        29:2.5,
+        30:2.8,
+        55:7.1,
+        56:14.0,
+        57:13.2,
+        58:11.2,
+        59:11.7,
+        60:13.3,
+        61:13.5,
+        62:10.6,
+        31:2.1,
+        32:6.4,
+        33:5.9,
+        34:6.5,
+        35:6.3,
+        37:6.6,
+        38:3.9,
+        39:1.4,
+        40:3.1,
+        41:3.1,
+        42:3.4,
+        43:3.2,
+        44:3.2,
+        45:3.2,
+        46:2.4,
+        47:0.77,
+        48:3.1,
+        49:2.9,
+        50:3.0,
+        51:2.7,
+        52:2.5,
+        53:2.8,
+        54:2.0}
 
 def main():
 
@@ -60,7 +124,7 @@ def main():
 
     parser.add_argument('--restart', action='store_true', default=False, help="restart from a previous run that didn't finish")
 
-    parser.add_argument('--produce-filelist', action='store_true', default=True, help='force the production of a filelist even if only some files are present')
+    parser.add_argument('--produce-filelist', action='store_true', default=False, help='force the production of a filelist even if only some files are present')
 
     args = parser.parse_args()
 
@@ -72,14 +136,13 @@ def main():
     pool = mp.Pool(processes=args.num_procs)
     manager = mp.Manager()
 
-    chunks = range(args.chunks[0], args.chunks[1])
+    chunks = range(args.chunks[0]//10+1, args.chunks[1]//10+1)
     dicts = {12:manager.dict(), 25:manager.dict(), 60:manager.dict(), 100:manager.dict()}
 
-    args.dets = {12:np.concatenate((np.arange(23, 31),
-        np.arange(48, 54))),
+    args.dets = {
+        12:np.concatenate((np.arange(23, 31), np.arange(48, 54))),
         25: np.concatenate((np.array([16,18,19,21, 22]), np.arange(40,46))),
-        60: np.concatenate((np.array([8,9,10,13,14,15]),
-            np.array([32,33,34,35,37]))),
+        60: np.concatenate((np.array([8,9,10,13,14,15]), np.array([32,33,34,35,37]))),
         100: np.concatenate((np.arange(1, 8), np.arange(56, 62)))
         }
 
@@ -94,12 +157,19 @@ def main():
 
     comm_tod = TODLoader(args.out_dir, 'iras', args.version, dicts, not args.restart)
 
-    x = [[pool.apply_async(make_chunk, args=[comm_tod, freq, chunk, args]) for freq in args.freqs] for chunk in chunks]
+
+    if args.num_procs == 1:
+        for chunk in chunks:
+            for freq in args.freqs:
+                make_chunk(comm_tod, freq, chunk, args)
+    else:
+
+        x = [[pool.apply_async(make_chunk, args=[comm_tod, freq, chunk, args]) for freq in args.freqs] for chunk in chunks]
 
 
-    for res1 in np.array(x):
-        for res in res1:
-            res.get()
+        for res1 in np.array(x):
+            for res in res1:
+                res.get()
 
     pool.close()
     pool.join()
@@ -109,10 +179,8 @@ def main():
 
 def make_chunk(comm_tod, freq, chunk, args):
 
-    r = hp.Rotator(coord=['C','G'])
-
-    if chunk == 273:
-        return
+    #if chunk == 273:
+    #    return
 
     #print(freq, chunk)
 
@@ -143,10 +211,7 @@ def make_chunk(comm_tod, freq, chunk, args):
     comm_tod.add_field(prefix + '/det', 'detlist_' + str(freq) + '.txt')
     comm_tod.add_field(prefix + '/mbang', mbangs)
     comm_tod.add_field(prefix + '/polang', polangs)
-    prefix = str(chunk).zfill(6) + '/common'
 
-    comm_tod.add_field(prefix + '/satpos', [0,0,0])
-    comm_tod.add_field(prefix + '/vsun', [0,0,0])
 
 
 
@@ -155,53 +220,77 @@ def make_chunk(comm_tod, freq, chunk, args):
     psiArray = [psiDigitize, ['huffman', {'dictNum':1}]]
 
 
-    for det in args.dets[freq]:
+    for scan in range((chunk-1)*10 + 1, chunk*10 + 1):
 
-        prefix = f'{chunk:06}/{det:02}'
-        f = f'{IRAS_DATA_PATH}/det_{det:02}/sopobs_{chunk:04}.npy'
-        t, lon, lat, tod = np.load(f)
-
-        
-
-        #print(chunk, det, freq, t.shape)
+        if scan == 273:
+            continue
 
 
-        # flag
-        flag_tot = np.zeros(len(t))
-        flag_tot[~np.isfinite(lon)] += 2**0
-        flag_tot[~np.isfinite(tod)] += 2**1
-         
-        tod[flag_tot != 0] = 0
-        lon[flag_tot != 0] = 0
-        lat[flag_tot != 0] = 0
-        comm_tod.add_field(prefix + '/tod', tod)
+        found = False
 
-        # pix and psi
-        psi = np.zeros_like(tod)
+        for det in args.dets[freq]:
 
-        comm_tod.add_field(prefix + '/psi', psi, psiArray)
+            prefix = f'{scan:06}/{det:02}'
+            f = f'{IRAS_DATA_PATH}/det_{det:02}/sopobs_{scan:04}.npy'
+            if os.path.exists(f):
+                t, lon, lat, tod = np.load(f)
+                found = True
+            else:
+                continue
 
 
-        good_data = flag_tot == 0
+            tod = tod/(Omegas[det]*1e-7)
 
-        lon[good_data], lat[good_data] = r(lon[good_data], lat[good_data], lonlat=True)
-        pix = hp.ang2pix(NSIDE, lon, lat, lonlat=True) 
-        comm_tod.add_field(prefix + '/pix', pix, compArray)
+            
+
+            #print(chunk, det, freq, t.shape)
+
+
+            # flag
+            flag_tot = np.zeros(len(t))
+            flag_tot[~np.isfinite(lon)] += 2**0
+            flag_tot[~np.isfinite(tod)] += 2**1
+             
+            tod[flag_tot != 0] = 0
+            lon[flag_tot != 0] = 0
+            lat[flag_tot != 0] = 0
+            comm_tod.add_field(prefix + '/tod', tod)
+
+            # pix and psi
+            psi = np.zeros_like(tod)
+
+            comm_tod.add_field(prefix + '/psi', psi, psiArray)
+
+
+            good_data = flag_tot == 0
+
+            #lon[good_data], lat[good_data] = r(lon[good_data], lat[good_data], lonlat=True)
+            sc = SkyCoord(ra=lon[good_data], dec=lat[good_data], unit='deg',
+                    equinox='B1950.0', obstime='J1983.5', frame=FK4)
+            coords = sc.transform_to(gc)
+            lon[good_data] = coords.l.value
+            lat[good_data] = coords.b.value
+            pix = hp.ang2pix(NSIDE, lon, lat, lonlat=True) 
+            comm_tod.add_field(prefix + '/pix', pix, compArray)
  
-        comm_tod.add_field(prefix + '/flag', flag_tot, compArray)
+            comm_tod.add_field(prefix + '/flag', flag_tot, compArray)
 
-        # scalars
-        scalars = [1, 1, 0.1, -2] # gain, sigma0, fknee, alpha
-        comm_tod.add_field(prefix + '/scalars', scalars)
+            # scalars
+            scalars = [1, 1, 0.1, -2] # gain, sigma0, fknee, alpha
+            comm_tod.add_field(prefix + '/scalars', scalars)
 
-    prefix = str(chunk).zfill(6) + '/common'
-    time = t[0]*u.s + t0
-    comm_tod.add_field(prefix + '/time', [time.mjd,0,0])
 
-    nsamps = len(t)
-    comm_tod.add_field(prefix + '/ntod', nsamps)   
+        if found:
+            prefix = str(scan).zfill(6) + '/common'
+            comm_tod.add_field(f'{scan:06}/common/satpos', [0,0,0])
+            comm_tod.add_field(f'{scan:06}/common/vsun', [0,0,0])
+            time = t[0]*u.s + t0
+            comm_tod.add_field(prefix + '/time', [time.mjd,0,0])
 
-    comm_tod.finalize_chunk(chunk)
+            nsamps = len(t)
+            comm_tod.add_field(prefix + '/ntod', nsamps)   
+
+            comm_tod.finalize_chunk(scan)
     comm_tod.finalize_file()
 
 if __name__ == '__main__':
